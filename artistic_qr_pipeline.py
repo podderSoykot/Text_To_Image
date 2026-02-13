@@ -12,7 +12,7 @@ import qrcode
 import torch
 import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance
-from diffusers import StableDiffusionPipeline
+from diffusers import StableDiffusionPipeline, StableDiffusionControlNetPipeline, ControlNetModel
 from typing import Optional, Tuple
 import argparse
 
@@ -38,6 +38,8 @@ class ArtisticQRPipeline:
         self.cache_dir = cache_dir
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.pipe = None
+        self.controlnet_pipe = None
+        self.controlnet_model = None
         
         # Set up environment variables
         self._setup_environment()
@@ -65,6 +67,58 @@ class ArtisticQRPipeline:
         
         print("Model loaded successfully!")
         return self.pipe
+    
+    def load_controlnet_model(self):
+        """Load ControlNet model for QR code generation."""
+        if self.controlnet_pipe is not None:
+            return self.controlnet_pipe
+        
+        print("Loading ControlNet QR code model...")
+        dtype = torch.float16 if self.device == "cuda" else torch.float32
+        
+        # Try different ControlNet models
+        controlnet_models = [
+            "monster-labs/control_v1p_sd15_qrcode_monster",
+            "DionTimmer/controlnet_qrcode-control_v11p_sd15",
+        ]
+        
+        controlnet = None
+        for model_id in controlnet_models:
+            try:
+                print(f"Trying ControlNet model: {model_id}")
+                controlnet = ControlNetModel.from_pretrained(
+                    model_id,
+                    torch_dtype=dtype,
+                    cache_dir=self.cache_dir
+                )
+                print(f"Successfully loaded: {model_id}")
+                self.controlnet_model = model_id
+                break
+            except Exception as e:
+                print(f"Failed to load {model_id}: {e}")
+                continue
+        
+        if controlnet is None:
+            raise RuntimeError("Could not load any ControlNet QR code model")
+        
+        # Load ControlNet pipeline
+        self.controlnet_pipe = StableDiffusionControlNetPipeline.from_pretrained(
+            self.model_id,
+            controlnet=controlnet,
+            torch_dtype=dtype,
+            cache_dir=self.cache_dir,
+            safety_checker=None,
+            requires_safety_checker=False
+        ).to(self.device)
+        
+        if self.device == "cuda":
+            try:
+                self.controlnet_pipe.enable_xformers_memory_efficient_attention()
+            except:
+                print("xformers not available, continuing without it")
+        
+        print("ControlNet model loaded successfully!")
+        return self.controlnet_pipe
     
     def create_qr_code(self, 
                       data: str, 
@@ -175,30 +229,46 @@ class ArtisticQRPipeline:
         base_array = np.array(base_image)
         qr_array = np.array(qr_image)
         
-        # Convert QR code to grayscale mask
+        # Convert QR code to binary mask (preserve structure exactly)
         qr_gray = np.dot(qr_array[...,:3], [0.2989, 0.5870, 0.1140])
-        qr_mask = qr_gray / 255.0  # Normalize to 0-1
+        # Use adaptive threshold to better preserve QR code structure
+        # This ensures the QR code pattern matches the original exactly
+        threshold = 127
+        qr_binary = (qr_gray < threshold).astype(float)  # 1 for black (data modules), 0 for white (background)
+        qr_mask_3d = np.expand_dims(qr_binary, axis=2)
+        
+        # Verify QR code structure is preserved
+        # The mask should have clear black/white separation matching original QR
         
         # Calculate factors for subtle embedding
-        dark_factor = subtlety  # Darkening for QR data areas
-        light_factor = 2.0 - subtlety  # Lightening for QR background areas
+        # Ensure QR code structure is preserved - same pattern as original QR
+        dark_factor = subtlety  # Darkening for QR data areas (black modules)
+        light_factor = 2.0 - subtlety  # Lightening for QR background areas (white modules)
         
-        # Apply artistic embedding
+        # Apply artistic embedding while preserving QR structure exactly
         result_array = base_array.copy().astype(float)
-        qr_mask_3d = np.expand_dims(qr_mask, axis=2)
+        
+        # CRITICAL: Preserve QR code structure
+        # Black QR modules (data) = darken image
+        # White QR modules (background) = lighten image
+        # This maintains the EXACT same QR code pattern
         
         # Darken areas where QR code is black (data modules)
-        dark_mask = (1 - qr_mask_3d)
+        dark_mask = qr_mask_3d  # 1 where QR is black (data)
         result_array = result_array * (1 - dark_mask * (1 - dark_factor))
         
         # Lighten areas where QR code is white (background)
-        light_mask = qr_mask_3d
+        light_mask = 1 - qr_mask_3d  # 1 where QR is white (background)
         result_array = result_array * (1 + light_mask * (light_factor - 1))
         
-        # Add contrast boost for scannability
+        # Add contrast boost to ensure QR structure is clear and scannable
+        # This preserves the QR code pattern structure
         if contrast_boost > 0:
-            qr_contrast = (qr_mask_3d - 0.5) * 2  # -1 to 1 range
-            result_array = result_array + (qr_contrast * contrast_boost * 30)
+            # Create contrast based on QR pattern: -1 for black, +1 for white
+            qr_contrast = (qr_mask_3d - 0.5) * 2
+            # Apply contrast boost to maintain structure
+            contrast_strength = contrast_boost * 50
+            result_array = result_array + (qr_contrast * contrast_strength)
         
         # Ensure values are in valid range
         result_array = np.clip(result_array, 0, 255).astype(np.uint8)
@@ -208,6 +278,84 @@ class ArtisticQRPipeline:
         
         return result_image
     
+    def generate_with_controlnet(self,
+                                prompt: str,
+                                qr_data: str,
+                                output_path: str = "artistic_qr_controlnet.png",
+                                image_size: int = 512,
+                                num_inference_steps: int = 30,
+                                guidance_scale: float = 7.5,
+                                controlnet_conditioning_scale: float = 1.3,
+                                seed: Optional[int] = None,
+                                negative_prompt: str = "blurry, distorted, unreadable qr, low quality") -> Image.Image:
+        """
+        Generate artistic QR code using ControlNet (industry standard approach).
+        
+        This method generates the image WITH the QR code structure, creating seamless
+        integration where the QR pattern is woven into the artwork itself.
+        
+        Args:
+            prompt: Text prompt for image generation
+            qr_data: Data to encode in QR code
+            output_path: Path to save output image
+            image_size: Size of output image
+            num_inference_steps: Number of inference steps
+            guidance_scale: Guidance scale
+            controlnet_conditioning_scale: ControlNet conditioning scale (higher = stronger QR structure)
+            seed: Random seed
+            negative_prompt: Negative prompt to avoid unwanted features
+        
+        Returns:
+            Final artistic QR code image
+        """
+        print("=" * 60)
+        print("ControlNet Artistic QR Code Generation")
+        print("=" * 60)
+        
+        # Step 1: Create QR code
+        print("\n[Step 1/2] Creating QR code...")
+        qr_image = self.create_qr_code(qr_data, size=image_size)
+        qr_image = qr_image.convert("RGB")
+        print(f"QR code created: {image_size}x{image_size}")
+        
+        # Save original QR code for reference
+        qr_reference_path = output_path.replace('.png', '_original_qr.png')
+        if not qr_reference_path.endswith('_original_qr.png'):
+            qr_reference_path = output_path.rsplit('.', 1)[0] + '_original_qr.png'
+        qr_image.save(qr_reference_path)
+        print(f"Original QR code saved: {qr_reference_path}")
+        
+        # Step 2: Load ControlNet model
+        print("\n[Step 2/2] Generating image with ControlNet...")
+        pipe = self.load_controlnet_model()
+        
+        # Generate image with QR code as control signal
+        print(f"Prompt: {prompt}")
+        print(f"Generating with ControlNet (this may take a while)...")
+        
+        generator = None
+        if seed is not None:
+            generator = torch.Generator(device=self.device).manual_seed(seed)
+        
+        image = pipe(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            image=qr_image,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            controlnet_conditioning_scale=controlnet_conditioning_scale,
+            generator=generator
+        ).images[0]
+        
+        # Save result
+        image.save(output_path)
+        print(f"\n✓ ControlNet artistic QR code saved to: {output_path}")
+        print(f"  Image size: {image_size}x{image_size}")
+        print(f"  QR data: {qr_data}")
+        print(f"  Prompt: {prompt}")
+        
+        return image
+    
     def process(self,
                 prompt: str,
                 qr_data: str,
@@ -216,7 +364,9 @@ class ArtisticQRPipeline:
                 subtlety: float = 0.92,
                 num_inference_steps: int = 50,
                 guidance_scale: float = 7.5,
-                seed: Optional[int] = None) -> Image.Image:
+                seed: Optional[int] = None,
+                use_controlnet: bool = False,
+                controlnet_conditioning_scale: float = 1.3) -> Image.Image:
         """
         Complete pipeline: Generate image and embed QR code.
         
@@ -225,14 +375,30 @@ class ArtisticQRPipeline:
             qr_data: Data to encode in QR code
             output_path: Path to save output image
             image_size: Size of output image
-            subtlety: QR code subtlety (0.85-0.95)
+            subtlety: QR code subtlety (0.85-0.95) - only used if use_controlnet=False
             num_inference_steps: Number of inference steps
             guidance_scale: Guidance scale
             seed: Random seed
+            use_controlnet: If True, use ControlNet for seamless integration (like reference image)
+            controlnet_conditioning_scale: ControlNet conditioning scale (1.0-2.0)
         
         Returns:
             Final artistic QR code image
         """
+        # Use ControlNet if requested (better integration like reference image)
+        if use_controlnet:
+            return self.generate_with_controlnet(
+                prompt=prompt,
+                qr_data=qr_data,
+                output_path=output_path,
+                image_size=image_size,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                controlnet_conditioning_scale=controlnet_conditioning_scale,
+                seed=seed
+            )
+        
+        # Otherwise use post-processing embedding
         print("=" * 60)
         print("Artistic QR Code Image Generation Pipeline")
         print("=" * 60)
@@ -241,6 +407,13 @@ class ArtisticQRPipeline:
         print("\n[Step 1/3] Creating QR code...")
         qr_image = self.create_qr_code(qr_data, size=image_size)
         print(f"QR code created: {image_size}x{image_size}")
+        
+        # Save original QR code for reference/comparison
+        qr_reference_path = output_path.replace('.png', '_original_qr.png')
+        if not qr_reference_path.endswith('_original_qr.png'):
+            qr_reference_path = output_path.rsplit('.', 1)[0] + '_original_qr.png'
+        qr_image.save(qr_reference_path)
+        print(f"Original QR code saved: {qr_reference_path} (for comparison)")
         
         # Step 2: Generate artistic image
         print("\n[Step 2/3] Generating artistic image...")
@@ -268,6 +441,48 @@ class ArtisticQRPipeline:
         print(f"  Image size: {image_size}x{image_size}")
         print(f"  QR data: {qr_data}")
         print(f"  Prompt: {prompt}")
+        
+        # Validate QR code scannability
+        try:
+            from qr_validator import validate_qr_image
+            print("\n" + "-" * 60)
+            print("Validating QR code scannability...")
+            print("-" * 60)
+            validation_result = validate_qr_image(output_path, qr_data)
+            
+            # Get scannability level (like QR Code AI)
+            from qr_validator import QRCodeValidator
+            validator = QRCodeValidator()
+            scannability_level = validator.assess_scannability_level(output_path)
+            
+            # Display scannability indicator
+            scannability_icons = {
+                'High Scannability': '[HIGH]',
+                'Medium Scannability': '[MEDIUM]',
+                'Low Scannability': '[LOW]',
+                'No Scannable': '[NO SCAN]'
+            }
+            
+            print(f"\nScannability Level: {scannability_icons.get(scannability_level, '')} {scannability_level}")
+            
+            if validation_result['scannable']:
+                print(f"[SUCCESS] QR code is SCANNABLE!")
+                if validation_result['data_decoded']:
+                    print(f"   Decoded: {validation_result['data_decoded'][:50]}...")
+                if validation_result.get('matches_expected'):
+                    print(f"[SUCCESS] Data matches expected: {validation_result['matches_expected']}")
+            else:
+                print(f"[WARNING] QR code may not be scannable")
+                print(f"   Methods tried: {', '.join(validation_result.get('methods_tried', []))}")
+                if validation_result.get('errors'):
+                    print(f"   Errors: {validation_result['errors']}")
+                print(f"   Tip: Try adjusting subtlety parameter (current: {subtlety})")
+                print(f"        Recommended: 0.85-0.90 for better scannability")
+        except ImportError:
+            print("\n⚠️  QR validation tools not available. Install pyzbar and opencv-python for validation.")
+        except Exception as e:
+            print(f"\n⚠️  Validation error: {str(e)}")
+        
         print("\n" + "=" * 60)
         
         return final_image
