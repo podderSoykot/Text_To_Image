@@ -3,7 +3,8 @@
   "qr_data": "Generate by_Soykot_Podder",
   "image_size": 512,
   "use_controlnet": true,
-  "controlnet_conditioning_scale": 1.3,
+  "controlnet_conditioning_scale": 1.6,
+  "qr_enhancement_strength": 0.2,
   "num_inference_steps": 30,
   "guidance_scale": 7.5,
   "validate_qr": true

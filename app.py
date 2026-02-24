@@ -129,7 +129,8 @@ class QRGenerationRequest(BaseModel):
     seed: Optional[int] = Field(None, description="Random seed for reproducibility (leave None for random)")
     validate_qr: bool = Field(True, description="Automatically validate QR code scannability after generation")
     use_controlnet: bool = Field(False, description="Use ControlNet for seamless QR integration (like reference image). Generates image WITH QR structure woven in.")
-    controlnet_conditioning_scale: float = Field(1.3, ge=0.5, le=2.0, description="ControlNet conditioning scale - higher = stronger QR structure (0.5-2.0). Only used if use_controlnet=True")
+    controlnet_conditioning_scale: float = Field(1.5, ge=0.5, le=2.0, description="ControlNet conditioning scale - higher = stronger QR structure (0.5-2.0). Only used if use_controlnet=True. Recommended: 1.5-1.7 for better scannability")
+    qr_enhancement_strength: float = Field(0.15, ge=0.0, le=0.3, description="QR code enhancement strength after ControlNet generation (0.0-0.3). Higher = more visible QR but less artistic. Only used if use_controlnet=True")
     
     class Config:
         json_schema_extra = {
@@ -355,7 +356,8 @@ async def generate_qr_code(
             guidance_scale=request.guidance_scale,
             seed=request.seed,
             use_controlnet=request.use_controlnet,
-            controlnet_conditioning_scale=request.controlnet_conditioning_scale
+            controlnet_conditioning_scale=request.controlnet_conditioning_scale,
+            qr_enhancement_strength=request.qr_enhancement_strength
         )
         
         generation_time = time.time() - start_time
