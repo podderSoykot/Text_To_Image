@@ -278,6 +278,69 @@ class ArtisticQRPipeline:
         
         return result_image
     
+    def enhance_qr_scannability(self,
+                               generated_image: Image.Image,
+                               qr_reference: Image.Image,
+                               enhancement_strength: float = 0.15) -> Image.Image:
+        """
+        Enhance QR code scannability in ControlNet-generated images.
+        Applies subtle contrast enhancement to preserve QR structure while maintaining artistic quality.
+        
+        Args:
+            generated_image: The ControlNet-generated artistic image
+            qr_reference: The original QR code reference (for pattern matching)
+            enhancement_strength: Strength of enhancement (0.0-0.3, higher = more visible QR)
+        
+        Returns:
+            Enhanced image with improved QR scannability
+        """
+        # Convert to RGB if needed
+        if generated_image.mode != 'RGB':
+            generated_image = generated_image.convert('RGB')
+        if qr_reference.mode != 'RGB':
+            qr_reference = qr_reference.convert('RGB')
+        
+        # Resize to match
+        target_size = generated_image.size[0]
+        qr_reference = qr_reference.resize((target_size, target_size), Image.Resampling.LANCZOS)
+        
+        # Convert to numpy arrays
+        gen_array = np.array(generated_image, dtype=float)
+        qr_array = np.array(qr_reference, dtype=float)
+        
+        # Create binary QR mask from reference
+        qr_gray = np.dot(qr_array[...,:3], [0.2989, 0.5870, 0.1140])
+        threshold = 127
+        qr_binary = (qr_gray < threshold).astype(float)  # 1 for black (data), 0 for white (background)
+        qr_mask_3d = np.expand_dims(qr_binary, axis=2)
+        
+        # Apply enhancement: strengthen contrast where QR code should be
+        # This makes the QR pattern more visible while keeping it artistic
+        result_array = gen_array.copy()
+        
+        # For black QR modules (data): darken slightly
+        dark_mask = qr_mask_3d
+        darken_factor = 1.0 - (enhancement_strength * 0.5)  # Subtle darkening
+        result_array = result_array * (1 - dark_mask * (1 - darken_factor))
+        
+        # For white QR modules (background): lighten slightly
+        light_mask = 1 - qr_mask_3d
+        lighten_factor = 1.0 + (enhancement_strength * 0.5)  # Subtle lightening
+        result_array = result_array * (1 + light_mask * (lighten_factor - 1))
+        
+        # Add contrast boost to QR pattern area
+        contrast_boost = enhancement_strength * 30
+        qr_contrast = (qr_mask_3d - 0.5) * 2  # -1 for black, +1 for white
+        result_array = result_array + (qr_contrast * contrast_boost)
+        
+        # Ensure values are in valid range
+        result_array = np.clip(result_array, 0, 255).astype(np.uint8)
+        
+        # Convert back to PIL Image
+        result_image = Image.fromarray(result_array)
+        
+        return result_image
+    
     def generate_with_controlnet(self,
                                 prompt: str,
                                 qr_data: str,
@@ -285,9 +348,10 @@ class ArtisticQRPipeline:
                                 image_size: int = 512,
                                 num_inference_steps: int = 30,
                                 guidance_scale: float = 7.5,
-                                controlnet_conditioning_scale: float = 1.3,
+                                controlnet_conditioning_scale: float = 1.5,
                                 seed: Optional[int] = None,
-                                negative_prompt: str = "blurry, distorted, unreadable qr, low quality") -> Image.Image:
+                                negative_prompt: str = "blurry, distorted, unreadable qr, low quality",
+                                qr_enhancement_strength: float = 0.15) -> Image.Image:
         """
         Generate artistic QR code using ControlNet (industry standard approach).
         
@@ -326,7 +390,7 @@ class ArtisticQRPipeline:
         print(f"Original QR code saved: {qr_reference_path}")
         
         # Step 2: Load ControlNet model
-        print("\n[Step 2/2] Generating image with ControlNet...")
+        print("\n[Step 2/3] Generating image with ControlNet...")
         pipe = self.load_controlnet_model()
         
         # Generate image with QR code as control signal
@@ -347,6 +411,10 @@ class ArtisticQRPipeline:
             generator=generator
         ).images[0]
         
+        # Step 3: Enhance QR code scannability (post-processing)
+        print("\n[Step 3/3] Enhancing QR code scannability...")
+        image = self.enhance_qr_scannability(image, qr_image, enhancement_strength=qr_enhancement_strength)
+        
         # Save result
         image.save(output_path)
         print(f"\n✓ ControlNet artistic QR code saved to: {output_path}")
@@ -366,7 +434,8 @@ class ArtisticQRPipeline:
                 guidance_scale: float = 7.5,
                 seed: Optional[int] = None,
                 use_controlnet: bool = False,
-                controlnet_conditioning_scale: float = 1.3) -> Image.Image:
+                controlnet_conditioning_scale: float = 1.5,
+                qr_enhancement_strength: float = 0.15) -> Image.Image:
         """
         Complete pipeline: Generate image and embed QR code.
         
@@ -395,7 +464,8 @@ class ArtisticQRPipeline:
                 num_inference_steps=num_inference_steps,
                 guidance_scale=guidance_scale,
                 controlnet_conditioning_scale=controlnet_conditioning_scale,
-                seed=seed
+                seed=seed,
+                qr_enhancement_strength=qr_enhancement_strength
             )
         
         # Otherwise use post-processing embedding
