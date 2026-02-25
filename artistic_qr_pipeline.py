@@ -200,7 +200,7 @@ class ArtisticQRPipeline:
                               base_image: Image.Image,
                               qr_image: Image.Image,
                               subtlety: float = 0.92,
-                              contrast_boost: float = 0.05) -> Image.Image:
+                              contrast_boost: float = 0.08) -> Image.Image:
         """
         Embed QR code into image artistically.
         Image remains prominent, QR code is subtle but scannable.
@@ -226,29 +226,56 @@ class ArtisticQRPipeline:
         qr_image = qr_image.resize((target_size, target_size), Image.Resampling.LANCZOS)
         
         # Convert to numpy arrays
-        base_array = np.array(base_image)
-        qr_array = np.array(qr_image)
+        base_array = np.array(base_image, dtype=float)
+        qr_array = np.array(qr_image, dtype=float)
         
         # Convert QR code to binary mask (preserve structure exactly)
         qr_gray = np.dot(qr_array[...,:3], [0.2989, 0.5870, 0.1140])
-        # Use adaptive threshold to better preserve QR code structure
+        # Use Otsu's threshold for better binary conversion
         # This ensures the QR code pattern matches the original exactly
         threshold = 127
+        # Try to use a more robust threshold
+        if qr_gray.max() > qr_gray.min():
+            # Use adaptive threshold based on image statistics
+            threshold = (qr_gray.max() + qr_gray.min()) / 2
         qr_binary = (qr_gray < threshold).astype(float)  # 1 for black (data modules), 0 for white (background)
         qr_mask_3d = np.expand_dims(qr_binary, axis=2)
         
-        # Verify QR code structure is preserved
-        # The mask should have clear black/white separation matching original QR
-        
         # Calculate factors for subtle embedding
-        # Ensure QR code structure is preserved - same pattern as original QR
-        dark_factor = subtlety  # Darkening for QR data areas (black modules)
-        light_factor = 2.0 - subtlety  # Lightening for QR background areas (white modules)
+        # Adjust factors to ensure minimum contrast for scannability
+        # QR scanners need at least 20-25% contrast to reliably decode
+        # Map subtlety to effective contrast: lower subtlety = more contrast
+        min_contrast = 0.20  # Minimum 20% contrast needed for reliable scanning
+        
+        # Calculate contrast based on subtlety parameter
+        # More aggressive contrast for better scannability
+        # subtlety 0.85 -> contrast 0.25 (25%)
+        # subtlety 0.88 -> contrast 0.22 (22%)
+        # subtlety 0.90 -> contrast 0.20 (20% minimum)
+        # subtlety 0.92 -> contrast 0.20 (20% minimum)
+        # subtlety 0.95 -> contrast 0.20 (20% minimum)
+        if subtlety <= 0.85:
+            effective_contrast = 0.25
+        elif subtlety <= 0.88:
+            # Linear interpolation between 0.85 and 0.88
+            effective_contrast = 0.25 - (subtlety - 0.85) * (0.25 - 0.22) / (0.88 - 0.85)
+        elif subtlety <= 0.90:
+            # Linear interpolation between 0.88 and 0.90
+            effective_contrast = 0.22 - (subtlety - 0.88) * (0.22 - 0.20) / (0.90 - 0.88)
+        else:
+            # For subtlety > 0.90, use minimum contrast
+            effective_contrast = min_contrast
+        
+        # Ensure we never go below minimum
+        effective_contrast = max(effective_contrast, min_contrast)
+        
+        dark_factor = 1.0 - effective_contrast  # Darkening for QR data areas (black modules)
+        light_factor = 1.0 + effective_contrast  # Lightening for QR background areas (white modules)
         
         # Apply artistic embedding while preserving QR structure exactly
-        result_array = base_array.copy().astype(float)
+        result_array = base_array.copy()
         
-        # CRITICAL: Preserve QR code structure
+        # CRITICAL: Preserve QR code structure with sufficient contrast
         # Black QR modules (data) = darken image
         # White QR modules (background) = lighten image
         # This maintains the EXACT same QR code pattern
@@ -261,14 +288,40 @@ class ArtisticQRPipeline:
         light_mask = 1 - qr_mask_3d  # 1 where QR is white (background)
         result_array = result_array * (1 + light_mask * (light_factor - 1))
         
-        # Add contrast boost to ensure QR structure is clear and scannable
+        # Add stronger contrast boost to ensure QR structure is clear and scannable
         # This preserves the QR code pattern structure
         if contrast_boost > 0:
             # Create contrast based on QR pattern: -1 for black, +1 for white
             qr_contrast = (qr_mask_3d - 0.5) * 2
-            # Apply contrast boost to maintain structure
-            contrast_strength = contrast_boost * 50
+            # Apply contrast boost - much stronger for better scannability
+            # Scale contrast boost based on subtlety - more aggressive for higher subtlety
+            contrast_multiplier = 100 if subtlety >= 0.88 else 80
+            contrast_strength = contrast_boost * contrast_multiplier
             result_array = result_array + (qr_contrast * contrast_strength)
+        
+        # Additional aggressive contrast enhancement for QR pattern
+        # This ensures the QR code is clearly distinguishable from the background
+        # Calculate the difference between black and white QR areas
+        qr_pattern_diff = (qr_mask_3d - 0.5) * 2  # -1 for black, +1 for white
+        # Apply additional pattern enhancement
+        pattern_enhancement = 15.0  # Additional 15 pixel boost to pattern
+        result_array = result_array + (qr_pattern_diff * pattern_enhancement)
+        
+        # Additional edge enhancement to preserve QR module boundaries
+        # This helps QR scanners detect module edges more clearly
+        try:
+            from scipy import ndimage
+            # Apply slight edge enhancement to QR pattern areas
+            # This helps preserve sharp boundaries between modules
+            qr_edges = ndimage.gaussian_filter(qr_binary.astype(float), sigma=0.5)
+            qr_edges = np.abs(qr_edges - qr_binary.astype(float))
+            edge_mask_3d = np.expand_dims(qr_edges, axis=2)
+            # Slight sharpening at edges
+            edge_boost = 5.0  # Small boost to edge contrast
+            result_array = result_array + (edge_mask_3d * edge_boost * (qr_mask_3d - 0.5) * 2)
+        except ImportError:
+            # scipy not available, skip edge enhancement
+            pass
         
         # Ensure values are in valid range
         result_array = np.clip(result_array, 0, 255).astype(np.uint8)
@@ -499,10 +552,13 @@ class ArtisticQRPipeline:
         
         # Step 3: Embed QR code artistically
         print("\n[Step 3/3] Embedding QR code artistically...")
+        # Use higher contrast boost for better scannability
+        contrast_boost_value = 0.08 if subtlety >= 0.90 else 0.06
         final_image = self.embed_qr_artistically(
             generated_image,
             qr_image,
-            subtlety=subtlety
+            subtlety=subtlety,
+            contrast_boost=contrast_boost_value
         )
         
         # Save result

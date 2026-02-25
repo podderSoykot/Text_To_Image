@@ -1,12 +1,12 @@
 {
-  "prompt": "a dog looking up at the sky, white fluffy clouds in blue sky, beautiful sunset colors, artistic illustration, detailed fur texture, expressive eyes, QR code pattern subtly integrated into clouds and sky background, high quality, vibrant colors",
-  "qr_data": "Generate by_Soykot_Podder",
-  "image_size": 512,
-  "use_controlnet": true,
-  "controlnet_conditioning_scale": 1.6,
-  "qr_enhancement_strength": 0.2,
-  "num_inference_steps": 30,
+  "controlnet_conditioning_scale": 1.5,
   "guidance_scale": 7.5,
+  "image_size": 512,
+  "num_inference_steps": 50,
+  "prompt": "a king looking up at the sky, white fluffy clouds in blue sky, beautiful sunset colors, artistic illustration, detailed fur texture, expressive eyes, QR code pattern subtly integrated into clouds and sky background, high quality, vibrant colors",
+  "qr_data": "https://example.com",
+  "seed": 42,
+  "use_controlnet": true,
+  "qr_enhancement_strength": 0.20,
   "validate_qr": true
 }
-
